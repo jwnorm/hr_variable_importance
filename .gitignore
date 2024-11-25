@@ -1,0 +1,6 @@
+*.pdf
+*.docx
+.Rhistory
+.Rproj.user
+.DS_Store
+project.Rproj

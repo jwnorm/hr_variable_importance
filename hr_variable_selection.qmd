@@ -1,0 +1,657 @@
+---
+title: "Home Run Variable Importance in Major League Baseball"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+**Jacob Norman\
+2024-11-24**
+
+> This is my final project for the course *ISE537: Statistical Models for Systems Analytics in Industrial Engineering*.
+
+## Problem Definition
+
+A home run can be one of the most electric plays in all of baseball, for both the fans and the players. This is when a batter hits a ball over the fence in play, allowing them to immediately round all bases and reach home plate. As such, it is also the quickest way to scoring runs, which has led to its proliferation in **M**ajor **L**eague **B**aseball (MLB) in the last decade. The strategy of this era has often been referred to as "three true outcomes," which suggests that the majority of at bats end in a home run, walk, or a strikeout. While home runs are exciting, walks and strikeouts are generally not considered so because no ball is put in play. MLB has been known to tamper with the ball, which can lead to a drastically different offensive environments from season-to-season. Sometimes the ball can even be altered mid-season, creating even more chaos. Combined with significant rule changes, the league is trying to move away from the three true outcome approach and towards something resembling baseball of decades long past. In the 2024 season, the number of home runs across MLB was lower versus the prior season.
+
+The purpose of this analysis is to determine what physical and environmental factors most strongly predict whether a ball hit into play is a home run or not. Physical factors are related to either the act of the batter hitting the ball, or the pitcher throwing the pitch. Intuition might suggest that the harder a batter swings, the more probable it is that he hits a home run. Environmental factors include where and when the game is played. For example, it is generally assumed that the ball has a tendency to fly further during warm weather, so the summer months have more home runs compared to the spring. This analysis seeks to determine which variables are the most important in predicting home runs and determine if these commonly held beliefs are indeed true.
+
+## Data
+
+Among the major professional sports in America, baseball has been the leader in collecting and reporting data throughout its rich history. Simply look at the box score of any game and observe that there are statistics peppered throughout, such as batting average, on base percentage plus slugging, earned run average, and many more. While these statistics likely have some relevance in predicting future home run output, they are generally aggregated across a single game or an entire season. The purpose of this analysis is to go down to the individual pitch level and determine what characteristics of the batter's swing and the ball thrown by the pitcher lead to home runs. Of course, some environmental variables will also be considered, such as time of year.
+
+MLB has an entire website dedicated to advanced statistics known as [Baseball Savant](https://baseballsavant.mlb.com), which is broken down into player pages, informative visualizations, and leaderboards. Perhaps because the baseball community is so data-driven, all of this information is publicly available at no charge. A powerful feature on the site is the *Search* tool, which allows interested fans to query essentially any information they want as long as it is collected. MLB's advanced analytics are often referred to as Statcast data, and it is all available at the fingertips of the fans.
+
+One major limitation is that the *Search* feature only returns 25,000 rows in a single request, which will be a problem since the data of interest, all base hits in 2024, is likely over that number. There is a relatively new `R` package, `sabRmetrics`, which will be of great help here. It leverages the API of Baseball Savant to pull the data right into `R` in an efficient manner.
+
+To start, let's load the required packages.
+
+```{r}
+# install.packages("devtools", "tidyverse", "glmnet")
+# devtools::install_github(repo = "saberpowers/sabRmetrics")
+library(tidyverse)
+library(glmnet)
+library(sabRmetrics)
+```
+
+We need to pull in all data for the 2024 MLB regular season. We can do this with one simple function call and read the data into a `tibble`, or a tidy dataframe.
+
+```{r}
+season <- download_baseballsavant(start_date = '2024-03-01',
+                                  end_date = '2024-10-01')
+```
+
+```{r}
+paste("There are", nrow(season), "rows and", ncol(season), "variables.")
+```
+
+With the full data downloaded, let's filter out unwanted rows and columns. There are over 100 data elements tracked for every single pitch thrown, over 700,000 events in total. To keep this manageable, here are some filters that we need to apply to the rows:
+
+-   **Base hits only:** Base hits is the denominator of interest, so we only want singles, doubles, triples, and home runs.
+
+-   **No inside-the-park home runs:** While technically classified as home runs, the ball does not ever leave the ballpark. There are very few of these per season and including them could potentially skew the data.
+
+-   **No bunts:** A single can be achieved by a bunt, but no swing is made by the batter. This is situational and we want to exclude these events.
+
+-   **No missing values:** Remove any rows that have a null value for *any* column attribute.
+
+Additionally, the number of variables will be heavily reduced to make the problem more manageable. There are a lot of descriptive fields that, while useful, contain categorical information. For example, `home_team` is a factor with 30 levels, meaning that there would be 29 additional predictors needed in a regression model. For performance reasons, we need to exclude these.
+
+```{r}
+# vector of all types of base hits
+base_hits <- c("single", "double", "triple", "home_run")
+
+# subset of columns we are interested in analyzing
+columns <- c("game_date", "events", "launch_speed", "launch_angle", "bat_speed",
+             "swing_length",  "hit_coord_x", "hit_coord_y", "effective_speed", 
+             "release_speed", "release_spin_rate", "extension", "spin_axis", 
+             "arm_angle", "release_pos_x", "release_pos_y", "release_pos_z", 
+             "pfx_x", "pfx_z", "plate_x", "plate_z", "vx0", "vy0", "vz0", 
+             "ax", "ay", "az") 
+
+# create new tibble based on row and column filters
+hits <- season %>%
+  filter(events %in% base_hits) %>%
+  filter(!str_detect(des, "inside-the-park")) %>%
+  filter(!str_detect(des, "bunt")) %>%
+  select(all_of(columns)) %>%
+  filter(complete.cases(.))
+```
+
+Finally, let's create a couple of new fields. One will be our response variable, `is_hr`, to flag if a base hit was a home run. The other will extract the `month` from game date as a numeric value.
+
+```{r}
+# engineer new features
+hits$is_hr <- as.integer(hits$events == "home_run")
+hits$month <- month(hits$game_date)
+
+# remove columns used as basis for new features
+hits <- hits %>%
+          select(-c(game_date, events))
+```
+
+The data, `hits`, now contains all relevant base hits on competitive swings for the 2024 MLB season. Let's see what the dimensions are.
+
+```{r}
+paste("There are", nrow(hits), "rows and", ncol(hits), "variables.")
+```
+
+Let's preview the first five rows of the `tibble` to get an idea of what the data looks like
+
+```{r}
+head(hits)
+```
+
+While still a large dataset, this is much more manageable. Another nice thing about Baseball Savant is that they have a [glossary](https://baseballsavant.mlb.com/csv-docs) dedicated to exactly what most of these attributes correspond to. The `arm_angle` attribute was notably absent, but its definition was found on the [page](https://baseballsavant.mlb.com/leaderboard/pitcher-arm-angles) of another visual. The following descriptions are taken exactly from Baseball Savant:
+
+-   `launch_speed`: Exit velocity of the batted ball as tracked by Statcast. For the limited subset of batted balls not tracked directly, estimates are included based on the process described [here](http://tangotiger.com/index.php/site/article/statcast-lab-no-nulls-in-batted-balls-launch-parameters).
+
+-   `launch_angle`: Launch angle of the batted ball as tracked by Statcast. For the limited subset of batted balls not tracked directly, estimates are included based on the process described [here](http://tangotiger.com/index.php/site/article/statcast-lab-no-nulls-in-batted-balls-launch-parameters).
+
+-   `bat_speed`: Bat speed is measured at the sweet-spot of the bat
+
+-   `swing_length`: The total (sum) distance in feet traveled of the head of the bat in X/Y/Z space, from start of tracking data until impact point.
+
+-   `hit_coord_x`: Hit coordinate X of batted ball.
+
+-   `hit_coord_y`: Hit coordinate Y of batted ball.
+
+-   `effective_speed`: Derived speed based on the the extension of the pitcher's release.
+
+-   `release_speed`: Pitch velocities from 2008-16 are via Pitch F/X, and adjusted to roughly out-of-hand release point. All velocities from 2017 and beyond are Statcast, which are reported out-of-hand.
+
+-   `release_spin_rate`: Spin rate of pitch tracked by Statcast.
+
+-   `extension`: Release extension of pitch in feet as tracked by Statcast.
+
+-   `spin_axis`: The Spin Axis in the 2D X-Z plane in degrees from 0 to 360, such that 180 represents a pure backspin fastball and 0 degrees represents a pure topspin (12-6) curveball.
+
+-   `arm_angle`: Arm angle at the time of pitch release, with 0 degrees being perfectly horizontal to the flat ground (a sidearmer) and 90 degrees being straight over the top. Arm angle is defined as a horizontal line extending from the location of the pitcher’s throwing shoulder and the location of ball at the time of the pitch.
+
+-   `release_pos_x`: Horizontal Release Position of the ball measured in feet from the catcher's perspective.
+
+-   `release_pos_y`: Release position of pitch measured in feet from the catcher's perspective.
+
+-   `release_pos_z`: Vertical Release Position of the ball measured in feet from the catcher's perspective.
+
+-   `pfx_x`: Horizontal movement in feet from the catcher's perspective.
+
+-   `pfx_z`: Vertical movement in feet from the catcher's perpsective.
+
+-   `plate_x`: Horizontal position of the ball when it crosses home plate from the catcher's perspective.
+
+-   `plate_z`: Vertical position of the ball when it crosses home plate from the catcher's perspective.
+
+-   `vx0`: The velocity of the pitch, in feet per second, in x-dimension, determined at y=50 feet.
+
+-   `vy0`: The velocity of the pitch, in feet per second, in y-dimension, determined at y=50 feet.
+
+-   `vz0`: The velocity of the pitch, in feet per second, in z-dimension, determined at y=50 feet.
+
+-   `ax`: The acceleration of the pitch, in feet per second per second, in x-dimension, determined at y=50 feet.
+
+-   `ay`: The acceleration of the pitch, in feet per second per second, in y-dimension, determined at y=50 feet.
+
+-   `az`: The acceleration of the pitch, in feet per second per second, in z-dimension, determined at y=50 feet.
+
+-   `is_hr`: Outcome of pitch is home run or base hit. 1: Home run, 2: Other base hit (binary)
+
+-   `month`: Month of the date the game is played.
+
+All fields are numeric, with the exception of the response which is binary. These 27 variables capture a ton of information about the swing of the bat and the pitch thrown. There are several spacial fields that capture information about the ball as it moves from the pitcher's hand to the barrel of the bat. It is likely that not all of these are useful in terms of prediction, which is exactly what we will investigate next.
+
+Another thing we observe in the filtered data is that some columns are on wildly different scales. For example, `release_spin_rate` is in the thousands while `extension` is in the single digits. Let's scale the predictors so that they all have a mean of zero and a standard deviation of one.
+
+```{r}
+hits <- hits %>%
+  mutate(across(-is_hr, scale))
+```
+
+The last data preparation step is to split the data into training and testing sets in order to evaluate model prediction. We will use an 80-20 split, with more data weighted towards training.
+
+```{r}
+# set seed for reproducibility
+set.seed(100)
+
+# randomly sample 20% of the total rows for the test set
+test_rows <- sample(nrow(hits), 0.2 * nrow(hits))
+
+# create train-test tibbles
+test <- hits[test_rows, ]
+train <- hits[-test_rows,]
+```
+
+## Model
+
+Since `is_hr` is a binary response variable, the model to predict whether a base hit is a home run should be logistic regression. If the set $P$ corresponds to all 26 predictors, the formula for the `full_model` is:
+
+$$
+p = 
+\frac{
+\exp(\hat\beta_0 + \sum_{p \in P}{\hat\beta_p x_p})
+}
+{
+1 + \exp(\hat\beta_0 + \sum_{p \in P}{\hat\beta_p x_p})
+}
+$$
+
+Here, $\hat\beta_0$ represents the intercept term. Let's fit this now.
+
+```{r}
+full_model <- glm(is_hr ~ ., binomial, train)
+summary(full_model)
+```
+
+We can see that there are only six predictors that are significant at the $\alpha=0.01$ significance level. This includes:
+
+-   `launch_speed`
+-   `launch_angle`
+-   `swing_length`
+-   `hit_coord_y`
+-   `effective_speed`
+-   `vy0`
+
+## Analysis
+
+Since this is a variable selection problem, we will investigate which columns are selected through several different methods:
+
+-   Naive method
+-   Stepwise regression, forward selection
+-   Stepwise regression, backward elimination
+-   LASSO regression
+-   Elastic Net regression
+
+Notice that none of these methods require total enumeration of all possible combinations of variables. For example, we could determine the best model by AIC for each number of predictors from 1 to 26; however, with the sheer volume of data this might not be feasible.
+
+### Naive Method
+
+To begin, let's try something simple and only select the six predictors in the full model that were significant at the $\alpha=0.01$ significance level. This is not a recommended statistical technique, but rather an illustration as to what many might try next after fitting a full regression model.
+
+```{r}
+naive_model <- glm(is_hr ~ launch_speed + launch_angle + swing_length + 
+                   hit_coord_y + effective_speed + vy0, 
+                   binomial, train)
+summary(naive_model)
+```
+
+We observe that all four predictors remain significant at the $\alpha=0.01$ significance level for the naive model. To test the significance of the predictors removed from the model, let's use an ANOVA test on this reduced model against the full model.
+
+```{r}
+anova(full_model, naive_model)
+```
+
+Because the p-value is near zero, we reject the null hypothesis that all the additional predictors in the full model have coefficients equal to zero. In other words, we conclude that they cannot be simply removed with no loss in explainability.
+
+### Forward Selection, AIC
+
+Next, we will use stepwise regression, via the forward selection approach using AIC. This starts with a null model, which only includes an intercept term, and adds a variable at each step until the termination criteria is met.
+
+```{r, warning=FALSE}
+# initialize null model
+null_model <- glm(is_hr ~ 1, binomial, train)
+
+# run forward selection
+model_fwd_aic <- step(null_model, 
+                      scope = list(lower = null_model, upper = full_model),
+                      direction = "forward", trace = 0)
+
+# display converged model output
+summary(model_fwd_aic)
+```
+
+This approach has selected 12 of the columns from the data:
+
+-   `hit_coord_y`
+-   `launch_angle`
+-   `launch_speed`
+-   `swing_length`
+-   `effective_speed`
+-   `plate_z`
+-   `bat_speed`
+-   `vx0`
+-   `ay`
+-   `month`
+-   `release_pos_x`
+-   `az`
+
+It is difficult to discern any distinct pattern in the variables selected here. It is a mix of attributes for the swing and attributes for the pitch, along with the month the game was played.
+
+### Forward Selection, BIC
+
+In the previous example, 12 out of the 26 predictors were selected. It is possible that this is indeed optimal; however, it could be a consequence of using AIC as the convergence criteria. Using BIC will place a greater penalty in adding more regressors to the model. Let's repeat the forward selection method but use BIC instead.
+
+```{r, warning=FALSE}
+# run forward selection
+model_fwd_bic <- step(null_model, 
+                      scope = list(lower = null_model, upper = full_model),
+                      direction = "forward", k = log(nrow(train)), trace = 0)
+
+# display converged model output
+summary(model_fwd_bic)
+```
+
+This is indeed a much smaller subset of the predictors; only five are selected. Notably, this includes all but one of the variables selected in the naive model, `vy0`.
+
+The majority of these variables are related to things the batter controls during an at bat, such as how hard he swings and the attack angle. The `effective_speed` coefficient is related to the pitch, but, crucially, is how fast the *batter* perceives the pitch to be based on release point. This model suggests that home run likelihood is more dependent on hitting characteristics versus the attributes of the pitch itself.
+
+### Backward Elimination, AIC
+
+Let's continue with stepwise regression, but this time start with the full model and slowly reduce the variables based on AIC. This is known as backward elimination.
+
+```{r, warning=FALSE}
+# run backward elimination
+model_bwd_aic <- step(full_model, 
+                  scope = list(lower = null_model, upper = full_model),
+                  direction = "backward", trace = 0)
+
+# display converged model output
+summary(model_bwd_aic)
+```
+
+Using this method results in 15 regressors being selected, many of which appeared in the forward selection with AIC model. The main difference seems to be with the spacial fields related to the dynamics of the pitch. There are more spacial fields in this model, not all of which are present in the forward selection model. All the hitting columns are included in both models.
+
+### Backward Elimination, BIC
+
+Sticking with backward elimination, let's now use BIC as the decision rule.
+
+```{r, warning=FALSE}
+# run backward elimination
+model_bwd_bic <- step(full_model, 
+                      scope = list(lower = null_model, upper = full_model),
+                      direction = "backward", k = log(nrow(train)), trace = 0)
+
+# display converged model output
+summary(model_bwd_bic)
+```
+
+This model is the exact same one determined with forward selection and BIC. This might suggest that there is something significant about this combination of predictors.
+
+### LASSO
+
+Before we can move on to LASSO regression, we need to format the data in a specific way. The response needs to be a vector and the predictors need to be a matrix.
+
+```{r}
+response <- train$is_hr
+Xpred <- train %>% 
+  select(-is_hr) %>% 
+  as.matrix()
+```
+
+LASSO regression applies a penalty based on the summation of the L1 norm of the estimated coefficients of the predictors. A key parameter in this model is $\lambda_{LASSO}$, which determines the magnitude of the penalty. To determine the optimal value of this parameter, $\lambda^{*}_{LASSO}$, we will perform 10-fold cross validation.
+
+```{r}
+# set seed for reproducibility
+set.seed(100)
+
+# run 10-fold cv for lasso
+lasso_cv <- cv.glmnet(Xpred, response, family = binomial, nfolds = 10, alpha = 1)
+
+# determine optimal lambda
+lambda_lasso <- lasso_cv$lambda.min
+```
+
+Based on cross validation, $\lambda^{*}_{LASSO}=$ `r round(lambda_lasso, 6)`. As $\lambda_{LASSO}$ approaches zero, the penalty gets smaller until it is totally absent and the problem is the GLM solution. In this case, $\lambda^{*}_{LASSO}$ is quite small, suggesting the penalty will be as well.
+
+With $\lambda^{*}_{LASSO}$, we can fit a LASSO regression model and see which variables are selected.
+
+```{r}
+# fit lasso model
+model_lasso <- glmnet(Xpred, response, family = binomial, alpha = 1)
+
+# get coefficient values at optimal lambda
+lasso_coefs <- coef(model_lasso, s = lambda_lasso)
+lasso_coefs
+```
+
+There are nine different predictors that are not selected, all of which are related to the characteristics of the pitch:
+
+-   `release_speed`
+-   `spin_axis`
+-   `release_pos_x`
+-   `release_pos_y`
+-   `pfx_x`
+-   `vx0`
+-   `vy0`
+-   `vz0`
+-   `az`
+
+My suspicion is that the velocity elements are already captured in `effective_speed`, and `spin_axis` might have a lot to do with `release_spin_rate`. Another nice thing about LASSO is that we can plot the coefficient paths as $\lambda_{LASSO}$ varies and determine the importance of each predictor.
+
+```{r}
+# plot coefficient paths
+plot(model_lasso, xvar = "lambda", lwd = 2, label = TRUE)
+abline(v = log(lambda_lasso), lwd = 2, lty = 2) # optimal lambda
+```
+
+```{r}
+# rank regressors in order of importance at optimal lambda
+lasso_abs_coefs <- as_tibble(abs(as.matrix(lasso_coefs)), rownames = "variable") %>%
+  rename(abs_coefficient = s1) %>%
+  filter(variable != "(Intercept)") %>%
+  filter(abs_coefficient > 0) %>%
+  arrange(desc(abs_coefficient))
+
+# display top 10 regressors
+lasso_abs_coefs %>%
+  head(10)
+```
+
+The top four predictors at $\lambda^{*}_{LASSO}$ are all related to the dynamics of the batter's swing, with the most important two being `launch_angle` and `launch_speed` by far. This makes sense because there is certainly a large part of the home run equation that is deterministic. Holding all environmental factors constant, a given launch angle and exit velocity of the ball might always lead to a home run. I believe that the LASSO model is picking up on that here.
+
+Also, we can observe that `hit_coord_y` (pink) is the last coefficient that goes to zero as $\lambda_{LASSO}$ varies in the coefficient paths, indicating that it is the most important regressor. Next are `launch_angle` (red) and `launch_speed` (black) which are the second and third most important variables, respectively.
+
+Of course, there is some uncertainty in whether a base hit is a home run. Some of the factors motivating this are:
+
+-   Dimensions of ballpark
+-   Height above sea level
+-   Game time temperature and humidity
+-   Wind speed and direction
+
+### Elastic Net
+
+In a similar vein, we will perform equally-weighted elastic net regression. This combines elements of LASSO and ridge regression in order to perform variable selection and regularization simultaneously. We will still need to perform 10-fold cross validation in order to determine $\lambda^{*}_{ENET}$.
+
+```{r}
+# set seed for reproducibility
+set.seed(100)
+
+# run 10-fold cv for elastic net
+enet_cv <- cv.glmnet(Xpred, response, family = binomial, nfolds = 10, alpha = 0.5)
+
+# determine optimal lambda
+lambda_enet <- enet_cv$lambda.min
+```
+
+Based on cross validation, $\lambda^{*}_{ENET}=$ `r round(lambda_enet, 6)`. This value is even smaller than we observed with the LASSO regression, meaning the penalty will be as well. I would predict that more regressors are chosen in this model.
+
+```{r}
+# fit elastic net model
+model_enet <- glmnet(Xpred, response, family = binomial, alpha = 0.5)
+
+# get coefficient values at optimal lambda
+enet_coefs <- coef(model_enet, s = lambda_enet)
+enet_coefs
+```
+
+Only six predictors are excluded, whereas nine were excluded for LASSO regression. The three that were included in elastic net regression but not LASSO regression are:
+
+-   `spin_axis`
+-   `release_pos_x`
+-   `az`
+
+Let's also investigate the coefficient paths and the top 10 most important predictors for the elastic net regression.
+
+```{r}
+# plot coefficient paths
+plot(model_enet, xvar = "lambda", lwd = 2, label = TRUE)
+abline(v = log(lambda_enet), lwd = 2, lty = 2) # optimal lambda
+```
+
+```{r}
+# rank regressors in order of importance at optimal lambda
+enet_abs_coefs <- as_tibble(abs(as.matrix(enet_coefs)), rownames = "variable") %>%
+  rename(abs_coefficient = s1) %>%
+  filter(variable != "(Intercept)") %>%
+  filter(abs_coefficient > 0) %>%
+  arrange(desc(abs_coefficient))
+
+# display top 10 regressors
+enet_abs_coefs %>%
+  head(10)
+```
+
+The top six regressors at $\lambda^{*}_{ENET}$ are unchanged from LASSO regression. This is further evidence that the swing itself is most important in determining if a base hit is a home run. Notice that `month` has fallen out of the top 10 and `plate_x` has taken its place. Similarly, the top three most important predictors as $\lambda_{ENET}$ approaches zero are the same as we observed previously with LASSO: `hit_coord_y` (pink), `launch_angle` (red), and `launch_speed` (black).
+
+## Results
+
+After running several models, it is time to determine how they compare versus one another in terms of model fit and prediction. For fit, we will consider how well the model fits the training data based on the following metrics:
+
+-   AIC
+-   BIC
+-   Deviance
+
+We also want to determine how well the models perform against new data, which is where the test data comes in. Since the model predictions will all be between 0 and 1, we need to round them up or down, using 0.5 at the cutoff in order to classify each prediction as a home run (1) or another type of base hit (0). In order to assess model predictive performance, we will check the model accuracy scores against each other.
+
+First, we need to run the predictions for each model.
+
+> **Note:** Since the forward selection with BIC and backward elimination with BIC led to the exact same combination of predictors, we will only use one of them, `model_fwd_bic`, and refer to it as stepwise regression with BIC.
+
+```{r}
+# convert predictors of test tibble to matrix
+Xtest <- test %>%
+          select(-is_hr) %>% 
+          as.matrix()
+
+# generate predictions based on specified model
+test$predict_full <- predict(full_model, test, type = "response")
+test$predict_naive <- predict(naive_model, test, type = "response")
+test$predict_fwd_aic <- predict(model_fwd_aic, test, type = "response")
+test$predict_bwd_aic <- predict(model_bwd_aic, test, type = "response")
+test$predict_step_bic <- predict(model_fwd_bic, test, type = "response")
+test$predict_lasso <- as.vector(predict(model_lasso, Xtest, 
+                                        s = lambda_lasso, type = "response"))
+test$predict_enet <- as.vector(predict(model_enet, Xtest, 
+                                       s = lambda_enet, type = "response"))
+
+# force predictions to 0 or 1
+test <- test %>%
+  mutate(across(c(predict_full, predict_naive, predict_fwd_aic, predict_bwd_aic,
+                  predict_step_bic, predict_lasso, predict_enet),
+                ~ as.integer(round(.))))
+```
+
+Now, let's compute all comparison measures for each model.
+
+```{r}
+# full model
+aic_full <- AIC(full_model)
+bic_full <- BIC(full_model)
+deviance_full <- deviance(full_model)
+accuracy_full <- mean(test$is_hr == test$predict_full)
+
+# naive model
+aic_naive <- AIC(naive_model)
+bic_naive <- BIC(naive_model)
+deviance_naive <- deviance(naive_model)
+accuracy_naive <- mean(test$is_hr == test$predict_naive)
+
+# forward selection with AIC
+aic_fwd_aic <- AIC(model_fwd_aic)
+bic_fwd_aic <- BIC(model_fwd_aic)
+deviance_fwd_aic <- deviance(model_fwd_aic)
+accuracy_fwd_aic <- mean(test$is_hr == test$predict_fwd_aic)
+
+# backward elimination with AIC
+aic_bwd_aic <- AIC(model_bwd_aic)
+bic_bwd_aic <- BIC(model_bwd_aic)
+deviance_bwd_aic <- deviance(model_bwd_aic)
+accuracy_bwd_aic <- mean(test$is_hr == test$predict_bwd_aic)
+
+# stepwise with BIC
+aic_step_bic <- AIC(model_fwd_bic)
+bic_step_bic <- BIC(model_fwd_bic)
+deviance_step_bic <- deviance(model_fwd_bic)
+accuracy_step_bic <- mean(test$is_hr == test$predict_step_bic)
+
+# LASSO
+ind_lasso <- which(model_lasso$lambda == lambda_lasso)
+deviance_lasso <- deviance(model_lasso)[ind_lasso]
+p_lasso <- nrow(lasso_abs_coefs) + 1  # add intercept
+aic_lasso <- deviance_lasso + 2 * p_lasso
+bic_lasso <- deviance_lasso + log(nrow(train)) * p_lasso
+accuracy_lasso <- mean(test$is_hr == test$predict_lasso)
+
+# elastic net
+ind_enet <- which(model_enet$lambda == lambda_enet)
+deviance_enet <- deviance(model_enet)[ind_enet]
+p_enet <- nrow(enet_abs_coefs) + 1  # add intercept
+aic_enet <- deviance_enet + 2 * p_enet
+bic_enet<- deviance_enet + log(nrow(train)) * p_enet
+accuracy_enet <- mean(test$is_hr == test$predict_enet)
+```
+
+Finally, let's display the results in a summary table.
+
+```{r}
+model_names <- c("full_model", "naive_model", "model_fwd_aic", "model_bwd_aic",
+                 "model_step_bic", "model_lasso", "model_enet")
+
+model_aics <- c(aic_full, aic_naive, aic_fwd_aic, aic_bwd_aic, 
+                aic_step_bic, aic_lasso, aic_enet)
+
+model_bics <- c(bic_full, bic_naive, bic_fwd_aic, bic_bwd_aic, 
+                bic_step_bic, bic_lasso, bic_enet)
+
+model_deviances <- c(deviance_full, deviance_naive, deviance_fwd_aic, deviance_bwd_aic, 
+                     deviance_step_bic, deviance_lasso, deviance_enet)
+
+model_accuracies <- c(accuracy_full, accuracy_naive, accuracy_fwd_aic, accuracy_bwd_aic, 
+                     accuracy_step_bic, accuracy_lasso, accuracy_enet)
+
+# summmarize results in tibble
+tibble(Model = model_names,
+       AIC = model_aics,
+       BIC = model_bics,
+       Deviance = model_deviances,
+       Accuracy = model_accuracies)
+```
+
+By AIC, the best model was found using backward selection and AIC. If BIC was used to determine the best model fit, it would be stepwise regression with BIC. This makes sense because there are only five predictors in this model and BIC places a higher penalty on the number of predictors as sample size increases. If we only used deviance to assess the model, it would be the full model. Unlike AIC and BIC, there is no penalty applied to deviance for the number of regressors. If we only considered the classification accuracy of the model against the test data, we would select the LASSO regression model; however, the differences between all seven models is very minimal in terms of accuracy.
+
+In short, there is no model that is the best by more than one metric. If I had to select a preferred model, I would side with the one with the fewer predictors. In general, simple models tend to perform better when tested against new data. This corresponds to the stepwise regression using BIC. Although this does not perform as well as the LASSO model in terms of prediction accuracy, they only differ by around 0.1 percent. This is a trade-off I am willing to make. Of course, we would need to supply more data to both models to see which predicted better in the long-run.
+
+To summarize, here is a table that lists which predictors are included in each model:
+
+|                     | **Full** | **Naive** | **Forward (AIC)** | **Backward (AIC)** | **Stepwise (BIC)** | **LASSO** | **Elastic Net** |
+|---------------|:-------:|:-------:|:-------:|:-------:|:-------:|:-------:|:-------:|
+| `launch_speed`      |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
+| `launch_angle`      |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
+| `bat_speed`         |    X     |           |         X         |         X          |                    |     X     |        X        |
+| `swing_length`      |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
+| `hit_coord_x`       |    X     |           |                   |                    |                    |     X     |        X        |
+| `hit_coord_y`       |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
+| `effective_speed`   |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
+| `release_speed`     |    X     |           |                   |                    |                    |           |                 |
+| `release_spin_rate` |    X     |           |                   |                    |                    |     X     |        X        |
+| `extension`         |    X     |           |                   |                    |                    |     X     |        X        |
+| `spin_axis`         |    X     |           |                   |                    |                    |           |        X        |
+| `arm_angle`         |    X     |           |                   |                    |                    |     X     |        X        |
+| `release_pos_x`     |    X     |           |         X         |                    |                    |           |        X        |
+| `release_pos_y`     |    X     |           |                   |         X          |                    |           |                 |
+| `release_pos_z`     |    X     |           |                   |         X          |                    |     X     |        X        |
+| `pfx_x`             |    X     |           |                   |                    |                    |           |                 |
+| `pfx_z`             |    X     |           |                   |                    |                    |     X     |        X        |
+| `plate_x`           |    X     |           |                   |         X          |                    |     X     |        X        |
+| `plate_z`           |    X     |           |         X         |                    |                    |     X     |        X        |
+| `vx0`               |    X     |           |         X         |                    |                    |           |                 |
+| `vy0`               |    X     |     X     |                   |         X          |                    |           |                 |
+| `vz0`               |    X     |           |                   |         X          |                    |           |                 |
+| `ax`                |    X     |           |                   |         X          |                    |     X     |        X        |
+| `ay`                |    X     |           |         X         |         X          |                    |     X     |        X        |
+| `az`                |    X     |           |         X         |         X          |                    |           |        X        |
+| `month`             |    X     |           |         X         |         X          |                    |     X     |        X        |
+
+There are five predictors that are included in every model:
+
+-   `launch_speed`
+-   `launch_angle`
+-   `swing_length`
+-   `hit_coord_y`
+-   `effective_speed`
+
+All but one of these columns are intimately related to the process of the batter swinging the bat. Launch angle and exit velocity describe the trajectory of the ball as it leaves the barrel. The exit velocity of the ball depends on how hard the batter swings, but also the length of the swing. In general, longer swings allow the batter to build up more leverage to launch the ball. Additionally, swing length can be a proxy for the point of contact. As an example, longer swings often correspond to when a batter is out in front of a pitch trying to pull the ball. This is important because left and right field generally have the shortest distances a ball needs to clear for a home run. The y-coordinate of the hit also captures the point of contact.
+
+There are also a few predictors that appear in at least five models:
+
+-   `bat_speed`
+-   `ay`
+-   `month`
+
+Again, the speed of the swing is a factor in determining the exit velocity of the ball. The effective speed and acceleration of the pitch in the y-dimension characterize the ball that the bat will make contact with. This suggests that the velocity perceived by the batter and acceleration of the pitch are the most important aspects of a pitch in determining if it is a home run. Of course, embedded in this is that there are different types of pitches, such as fastball, curveball, changeup, and slider. These all have different velocity and movement profiles that would be captured in the Statcast data. Lastly, the month of the game is selected, suggesting that the time of year does play into home run probability.
+
+## Conclusion
+
+Since the eruption of Statcast nearly a decade ago, the main data elements that baseball analysts use to characterize the power output of players include maximum exit velocity, or maxEV, and barrel rate. The maxEV is the maximum launch speed of a ball a batter hit into play in a given season. This is an attempt to capture power potential. A barrel is defined by [Baseball Savant](https://www.mlb.com/glossary/statcast) as "a batted ball with the perfect combination of exit velocity and launch angle, or the most high-value batted balls." This sounds remarkably similar to what we have found in this variable selection problem, since all models selected `launch_speed` and `launch_angle`.
+
+In April 2024, MLB launch bat tracking metrics including swing length and bat speed. Since these fields are so new, the analytics community has not determined exactly how these interplay with power output. There have been some puzzling correlations observed. For example, some players with long swings tend to hit an above average amount of home runs, while others hit next to none. Of course, our analysis found that `bat_speed` and `swing_length` do indeed factor into whether a base hit is a home run. My thought is that these swing characteristics play into the exit velocity and launch angle of a ball, at least to an extent.
+
+Surprisingly, very few of the attributes that described the flight path of the pitch actually ended up being consistently selected by the different methods. This suggests that the hitter has more control over whether a base hit is a home run compared to the pitcher. Of course, this could be because all swings and misses, foul balls, and outs were removed from the data. In other words, if we expanded the analysis to include all pitches and not just those that ended in a base hit, I would expect the dynamics of the pitch to play a much bigger role in determining if a pitch is hit out of the park.
+
+As it stands, `effective_speed` was the only attribute of the pitch that was deemed important by all variable selection methods. Pitches with higher velocity can lead to weaker contact if the batter struggles to square up the ball. This field also is adjusted for the release point of the ball out of the pitcher's hand. If the ball is released closer to the plate, then the batter will perceive the ball as moving faster than they would normally, which could lead to weak contact as well. Conversely, if a 99 mph fastball is hit with the sweet spot of the bat, the added velocity will surely play into the exit velocity of the ball off the barrel. This means that the velocity of the pitch has two different effects working both for and against home runs.
+
+In a future analysis, bringing in all 115 possible predictors from Statcast could help explain some of these gaps that were identified throughout this report. All categorical fields were excluded as part of this analysis for computational reasons; however, they convey important information. Many of them are related to the pitch, such as `pitch_type`. This could help break down the different impacts of velocity. For example, a 92 mph fastball and a 92 mph breaking ball should not be treated equal. Additionally, the park that the game is being played is generally considered to be an important factor in home run hitting, so much so that Statcast has [park factors](https://baseballsavant.mlb.com/leaderboard/statcast-park-factors) that attempt to explain which ballparks are conducive to home runs and which are not. For example, Great American Ball Park in Cinciannati and Coors Field in Denver are two of the most home run friendly parks. On the other hand, Oracle Park in San Francisco and Comerica Park in Detroit are known to suppress home runs. These are just two possible additional factors that could be important in determining home run probability.
+
+## References
+
+-   Baseball Savant, MLB
+
+    -   [Statcast Search (data)](https://baseballsavant.mlb.com/statcast_search)
+
+    -   [Statcast Search CSV Documentation](https://baseballsavant.mlb.com/csv-docs)
+
+    -   [Statcast Glossary](https://www.mlb.com/glossary/statcast)
+
+    -   [Statcast Park Factors Leaderboard](https://baseballsavant.mlb.com/leaderboard/statcast-park-factors)
+
+    -   [Statcast Arm Angle Leaderboard](https://baseballsavant.mlb.com/leaderboard/pitcher-arm-angles)
