@@ -584,7 +584,7 @@ In short, there is no model that is the best by more than one metric. If I had t
 To summarize, here is a table that lists which predictors are included in each model:
 
 |                     | **Full** | **Naive** | **Forward (AIC)** | **Backward (AIC)** | **Stepwise (BIC)** | **LASSO** | **Elastic Net** |
-|---------------------|:--------:|:---------:|:-----------------:|:------------------:|:------------------:|:---------:|:---------------:|
+|---------------|:-------:|:-------:|:-------:|:-------:|:-------:|:-------:|:-------:|
 | `launch_speed`      |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
 | `launch_angle`      |    X     |     X     |         X         |         X          |         X          |     X     |        X        |
 | `bat_speed`         |    X     |           |         X         |         X          |                    |     X     |        X        |
