@@ -41,3 +41,5 @@ p =
 1 + \exp(\hat\beta_0 + \sum_{p \in P}{\hat\beta_p x_p})
 }
 $$
+
+Where $\hat\beta_0$ represents the intercept term.
