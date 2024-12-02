@@ -10,7 +10,7 @@ This project concerns analyzing Statcast data queried from Baseball Savant using
 
     -   Forward selection
 
-    -   Backward elimintaion
+    -   Backward elimination
 
 -   LASSO regression
 
@@ -26,7 +26,7 @@ The data examined is from the 2024 MLB regular season for all Statcast events th
 
 -   No missing fields in any columns
 
-Similarly, the columns of 115 data elements were reduced to a subset of 27 variables. All catetgorical variable were excluded for computational reasons.
+Similarly, the columns of 115 data elements were reduced to a subset of 27 variables. All categorical variable were excluded for computational reasons.
 
 ## Model
 

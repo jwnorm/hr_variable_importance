@@ -1,5 +1,7 @@
 *.pdf
 *.docx
+*.pptx
+*.mp4
 .Rhistory
 .Rproj.user
 .DS_Store
